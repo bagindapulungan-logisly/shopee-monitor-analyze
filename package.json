@@ -1,0 +1,25 @@
+{
+  "name": "shopee-monitor-analyze",
+  "version": "1.0.0",
+  "description": "user chat behaviour analyze",
+  "homepage": "https://github.com/bagindapulungan-logisly/shopee-monitor-analyze#readme",
+  "bugs": {
+    "url": "https://github.com/bagindapulungan-logisly/shopee-monitor-analyze/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bagindapulungan-logisly/shopee-monitor-analyze.git"
+  },
+  "license": "ISC",
+  "author": "baginda isfa",
+  "type": "commonjs",
+  "main": "analyzeChats.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "mongodb": "^7.0.0",
+    "mysql2": "^3.16.2"
+  }
+}
