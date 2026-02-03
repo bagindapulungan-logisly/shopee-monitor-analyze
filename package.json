@@ -20,6 +20,7 @@
   "dependencies": {
     "dotenv": "^17.2.3",
     "mongodb": "^7.0.0",
-    "mysql2": "^3.16.2"
+    "mysql2": "^3.16.2",
+    "xlsx": "^0.18.5"
   }
 }
