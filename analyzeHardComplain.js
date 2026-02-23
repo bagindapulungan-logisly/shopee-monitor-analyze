@@ -5,14 +5,11 @@ const path = require('path');
 const xlsx = require('xlsx');
 const { STOPWORDS, BLOCKLIST_TOKENS, BLOCKLIST_PHRASES } = require('./filters');
 
-const COMPLAIN_PATTERNS = {
-  soft: [
+const DEFAULT_COMPLAIN_SEEDS = [
     'kecewa',
     'tidak puas',
     'gak puas',
-    'tidak sesuai'
-  ],
-  operational: [
+    'tidak sesuai',
     'tidak pickup',
     'belum pickup',
     'driver tidak datang',
@@ -20,78 +17,42 @@ const COMPLAIN_PATTERNS = {
     'over sla',
     'lewat sla',
     'terlambat',
-    'delay'
-  ],
-  escalation: [
+    'delay',
     'sudah berapa kali',
     'kapan selesai',
     'ini terakhir',
     'kami laporkan',
     'putus kontrak',
-    'stop kirim'
-  ],
-  hard: [
     'anjing',
     'bangsat',
     'goblok',
     'tolol',
-    'kampret'
-  ]
-};
+    'kenapa telat terus ya',
+    'driver ini kebiasaan terlambat',
+    'kalau begini kita gausa order lagi deh',
+    'driver ini ga becus banget sih',
+    'driver ini ga becus banget',
+    'lokasi tidak sesuai',
+    'alasan keterlambatan',
+    'armada tidak datang',
+    'karatan',
+    'bau',
+    'keterlambatan unit tsb',
+    'tidak ada update terkait keterlambatan',
+    'tidak ada update terkait keterlambatan unit',
+    'tidak ada update terkait keterlambatan armada',
+    'Kok baru skr',
+];
 
-const calculateSeverity = (body) => {
-  const text = normalizeText(body);
-  let score = 0;
-  let matchedCategory = [];
-
-  const checkCategory = (category, weight) => {
-    for (const phrase of COMPLAIN_PATTERNS[category]) {
-      if (text.includes(phrase)) {
-        score += weight;
-        matchedCategory.push(category);
-      }
-    }
-  };
-
-  checkCategory('soft', 1);
-  checkCategory('operational', 2);
-  checkCategory('escalation', 3);
-  checkCategory('hard', 5);
-
-  // CAPSLOCK DETECTION
-  const isCaps = body.length > 10 && body === body.toUpperCase();
-  if (isCaps) score += 2;
-
-  // MULTIPLE !!!
-  if (/!{2,}/.test(body)) score += 1;
-
-  return {
-    score,
-    categories: [...new Set(matchedCategory)],
-    level:
-      score >= 7 ? 'critical' :
-      score >= 4 ? 'high' :
-      score >= 2 ? 'medium' :
-      score >= 1 ? 'low' :
-      'none'
-  };
-};
-
-const INDONESIAN_HINTS = new Set([
-  'yang', 'dan', 'atau', 'untuk', 'dengan', 'dari', 'ke', 'di', 'itu', 'ini',
-  'tidak', 'ga', 'gak', 'nggak', 'ngga', 'belum', 'sudah', 'udah', 'lagi',
-  'kami', 'saya', 'aku', 'kita', 'anda', 'kamu', 'mohon', 'tolong', 'minta'
-]);
+/* ============================= */
+/* ========= UTILITIES ========= */
+/* ============================= */
 
 const normalizePhone = phone => {
   if (!phone) return null;
   let p = phone.replace(/\D/g, '');
-  if (p.startsWith('0')) {
-    p = '62' + p.slice(1);
-  }
-  if (!p.startsWith('62')) {
-    p = '62' + p;
-  }
+  if (p.startsWith('0')) p = '62' + p.slice(1);
+  if (!p.startsWith('62')) p = '62' + p;
   return p;
 };
 
@@ -104,34 +65,19 @@ const normalizeText = text => {
 };
 
 const tokenize = text => {
-  const normalized = normalizeText(text);
-  return normalized
+  return normalizeText(text)
     .split(' ')
-    .map(t => t.trim())
     .filter(t => t.length > 1 && !STOPWORDS.has(t));
 };
 
 const extractNgrams = (tokens, minN = 1, maxN = 3) => {
   const phrases = [];
-  for (let n = minN; n <= maxN; n += 1) {
-    for (let i = 0; i <= tokens.length - n; i += 1) {
+  for (let n = minN; n <= maxN; n++) {
+    for (let i = 0; i <= tokens.length - n; i++) {
       phrases.push(tokens.slice(i, i + n).join(' '));
     }
   }
   return phrases;
-};
-
-const suggestWeight = (complainCount, otherCount) => {
-  const total = complainCount + otherCount;
-  if (total === 0) return { weight: 0, type: 'none', ratio: 0 };
-
-  const ratio = complainCount > otherCount
-    ? complainCount / Math.max(otherCount, 1)
-    : otherCount / Math.max(complainCount, 1);
-
-  if (ratio >= 3 && total >= 3) return { weight: 3, type: 'strong', ratio };
-  if (ratio >= 1.5 && total >= 2) return { weight: 2, type: 'medium', ratio };
-  return { weight: 1, type: 'weak', ratio };
 };
 
 const isBlockedPhrase = phrase => {
@@ -139,36 +85,48 @@ const isBlockedPhrase = phrase => {
   const tokens = phrase.split(' ');
   if (tokens.some(t => BLOCKLIST_TOKENS.has(t))) return true;
   if (tokens.some(t => /\d/.test(t))) return true;
+  if (phrase.length < 4) return true;
   return false;
 };
 
-const isLikelyIndonesian = text => {
-  const tokens = normalizeText(text).split(' ').filter(Boolean);
-  if (tokens.length === 0) return false;
-
-  let hits = 0;
-  tokens.forEach(t => {
-    if (INDONESIAN_HINTS.has(t)) hits += 1;
-  });
-
-  if (tokens.length <= 3) {
-    return hits >= 1;
-  }
-
-  return hits >= 2;
+const matchesSeed = (text, seeds) => {
+  const normalized = normalizeText(text);
+  return seeds.some(seed => normalized.includes(seed));
 };
 
-const loadInternalPhones = async () => {
+const parseDate = value => {
+  if (!value) return null;
+  if (typeof value === 'number') {
+    const ts = value > 1e12 ? value : value * 1000;
+    return new Date(ts);
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const extractDocDate = doc =>
+  parseDate(doc.timestamp) ||
+  parseDate(doc.created_at) ||
+  parseDate(doc.time) ||
+  null;
+
+/* ============================= */
+/* ===== INTERNAL FILTER ======= */
+/* ============================= */
+
+const loadInternalPhones = () => {
   const filePath = process.env.USER_ADMIN_JSON
     ? path.resolve(process.env.USER_ADMIN_JSON)
     : path.join(__dirname, 'user_admin_202602231223.json');
 
   if (!fs.existsSync(filePath)) {
-    throw new Error(`User admin JSON not found: ${filePath}`);
+    console.warn('Internal user JSON not found. Skipping filter.');
+    return new Set();
   }
 
   const raw = fs.readFileSync(filePath, 'utf8');
   const parsed = JSON.parse(raw);
+
   const rows = Array.isArray(parsed)
     ? parsed
     : Array.isArray(parsed.user_admin)
@@ -176,6 +134,7 @@ const loadInternalPhones = async () => {
       : [];
 
   const set = new Set();
+
   rows.forEach(r => {
     if (Number(r.status) !== 1) return;
     if (!r.phone) return;
@@ -186,78 +145,53 @@ const loadInternalPhones = async () => {
   return set;
 };
 
-const getSeedPhrases = () => {
-  const raw = process.env.COMPLAIN_SEED_PHRASES || '';
-  if (!raw.trim()) return DEFAULT_COMPLAIN_SEEDS;
+/* ============================= */
+/* ===== WEIGHT CALCULATION ==== */
+/* ============================= */
 
-  return raw
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean);
-};
+const calculateWeight = (complainCount, normalCount) => {
+  const minTotal = Number(process.env.MIN_TOTAL_COUNT || 3);
+  const minComplain = Number(process.env.MIN_COMPLAIN_COUNT || 2);
+  const minRatio = Number(process.env.MIN_RATIO || 1.5);
 
-const matchesSeed = (text, seedPhrases) => {
-  const normalized = normalizeText(text);
-  return seedPhrases.some(phrase => normalized.includes(phrase));
-};
+  const total = complainCount + normalCount;
+  if (total < minTotal) return null;
+  if (complainCount < minComplain) return null;
 
-const parseDate = value => {
-  if (!value) return null;
-  if (typeof value === 'number') {
-    const ts = value > 1e12 ? value : value * 1000;
-    return new Date(ts);
+  const ratio = complainCount / Math.max(normalCount, 1);
+  if (ratio < minRatio) return null;
+
+  if (ratio >= 3 && complainCount >= 3) {
+    return { weight: 3, type: 'strong', ratio };
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date;
+
+  if (ratio >= 1.5) {
+    return { weight: 2, type: 'medium', ratio };
+  }
+
+  return { weight: 1, type: 'weak', ratio };
 };
 
-const extractDocDate = doc => {
-  return parseDate(doc.timestamp) || parseDate(doc.created_at) || parseDate(doc.time) || null;
-};
+/* ============================= */
+/* ========== EXPORT =========== */
+/* ============================= */
 
 const toXlsx = (rows, outputFile) => {
-  const data = rows.map(r => ({
-    phrase: r.phrase,
-    suggested_intent: r.suggested_intent,
-    weight: r.weight,
-    type: r.type,
-    problem_count: r.problem_count,
-    update_count: r.update_count,
-    ratio: Number(r.ratio.toFixed(2)),
-    examples: r.examples.join(' | ')
-  }));
-
-  const worksheet = xlsx.utils.json_to_sheet(data, {
-    header: [
-      'phrase',
-      'suggested_intent',
-      'weight',
-      'type',
-      'problem_count',
-      'update_count',
-      'ratio',
-      'examples'
-    ]
-  });
+  const worksheet = xlsx.utils.json_to_sheet(rows);
   const workbook = xlsx.utils.book_new();
-  xlsx.utils.book_append_sheet(workbook, worksheet, 'complain_suggestions');
+  xlsx.utils.book_append_sheet(workbook, worksheet, 'intent_keywords');
   xlsx.writeFile(workbook, outputFile);
 };
 
+/* ============================= */
+/* ============ MAIN =========== */
+/* ============================= */
+
 const run = async () => {
-  const minPhraseCount = Number(process.env.MIN_PHRASE_COUNT || 2);
+  const internalPhones = loadInternalPhones();
+  console.log('Internal phones loaded:', internalPhones.size);
+  console.log('Starting complain phrase mining...');
   const maxExamplesPerPhrase = Number(process.env.MAX_EXAMPLES_PER_PHRASE || 3);
-  const requireTruckNumber = process.env.REQUIRE_TRUCK_NUMBER === '1';
-
-  const chatIdFilter = (process.env.CHAT_ID || '').trim();
-  const startDate = parseDate(process.env.START_DATE);
-  const endDate = parseDate(process.env.END_DATE);
-
-  const seedPhrases = getSeedPhrases();
-  const internalPhones = await loadInternalPhones();
-  console.log('Internal Phones Loaded:', internalPhones.size);
-  console.log('Seed Phrases:', seedPhrases.length);
 
   const mongo = new MongoClient(process.env.MONGO_URI);
   await mongo.connect();
@@ -265,108 +199,136 @@ const run = async () => {
   const db = mongo.db(process.env.MONGO_DB);
   const collection = db.collection('messages');
 
-  const query = {
-    is_forwarded: false
-  };
+  const complainMap = new Map();
+  const normalMap = new Map();
+  const exampleMap = new Map();
 
-  if (chatIdFilter) {
-    query.chat_id = chatIdFilter;
-  }
+  const startDate = parseDate(process.env.START_DATE);
+  const endDate = parseDate(process.env.END_DATE);
 
-  const cursor = collection.find(query);
-  const phraseStats = new Map();
+  const cursor = collection.find({ is_forwarded: false });
+  const logEvery = Number(process.env.LOG_EVERY || 5000);
+  let processed = 0;
+  let complainDocs = 0;
+  let normalDocs = 0;
+  let skippedDocs = 0;
 
-  while (await cursor.hasNext()) {
-    const doc = await cursor.next();
+  for await (const doc of cursor) {
+    processed += 1;
+    let author = normalizePhone((doc.author || '').split('@')[0]);
+    if (!author) continue;
 
-    let author = doc.author || '';
-    author = author.split('@')[0];
-    author = normalizePhone(author);
-
-    if (!author || internalPhones.has(author)) {
+    // ✅ FILTER ONLY EXTERNAL USER
+    if (internalPhones.has(author)) {
+      skippedDocs += 1;
+      if (processed % logEvery === 0) {
+        console.log('Progress:', processed, 'docs | complain:', complainDocs, 'normal:', normalDocs, 'skipped:', skippedDocs);
+      }
       continue;
     }
 
     const body = doc.body || '';
-    if (!body) continue;
-    if (!isLikelyIndonesian(body)) continue;
+    if (!body) {
+      skippedDocs += 1;
+      if (processed % logEvery === 0) {
+        console.log('Progress:', processed, 'docs | complain:', complainDocs, 'normal:', normalDocs, 'skipped:', skippedDocs);
+      }
+      continue;
+    }
 
     const docDate = extractDocDate(doc);
     if (startDate && docDate && docDate < startDate) continue;
     if (endDate && docDate && docDate > endDate) continue;
 
-    if (!matchesSeed(body, seedPhrases)) {
-      continue;
-    }
-
-    if (requireTruckNumber) {
-      const plateRegex = /\b([A-Z]{1,2})\s?-?\s?(\d{1,4})\s?-?\s?([A-Z]{1,3})\b/i;
-      if (!plateRegex.test(body)) {
-        continue;
-      }
+    const isComplain = matchesSeed(body, DEFAULT_COMPLAIN_SEEDS);
+    if (isComplain) {
+      complainDocs += 1;
+    } else {
+      normalDocs += 1;
     }
 
     const tokens = tokenize(body);
+    if (tokens.length === 0) {
+      skippedDocs += 1;
+      if (processed % logEvery === 0) {
+        console.log('Progress:', processed, 'docs | complain:', complainDocs, 'normal:', normalDocs, 'skipped:', skippedDocs);
+      }
+      continue;
+    }
+
     const phrases = extractNgrams(tokens, 1, 3);
+    const cleanBody = body.replace(/\s+/g, ' ').trim();
 
     phrases.forEach(phrase => {
       if (isBlockedPhrase(phrase)) return;
-      if (!phraseStats.has(phrase)) {
-        phraseStats.set(phrase, { count: 0, examples: [] });
+
+      const targetMap = isComplain ? complainMap : normalMap;
+
+      if (!targetMap.has(phrase)) {
+        targetMap.set(phrase, 0);
       }
-      const entry = phraseStats.get(phrase);
-      entry.count += 1;
-      if (entry.examples.length < maxExamplesPerPhrase) {
-        const clean = normalizeText(body);
-        if (!entry.examples.includes(clean)) {
-          entry.examples.push(clean);
+
+      targetMap.set(phrase, targetMap.get(phrase) + 1);
+
+      if (isComplain && cleanBody) {
+        if (!exampleMap.has(phrase)) {
+          exampleMap.set(phrase, []);
+        }
+        const examples = exampleMap.get(phrase);
+        if (examples.length < maxExamplesPerPhrase && !examples.includes(cleanBody)) {
+          examples.push(cleanBody);
         }
       }
     });
+
+    if (processed % logEvery === 0) {
+      console.log('Progress:', processed, 'docs | complain:', complainDocs, 'normal:', normalDocs, 'skipped:', skippedDocs);
+    }
   }
 
-  const suggestions = [];
-  for (const [phrase, stats] of phraseStats.entries()) {
-    if (isBlockedPhrase(phrase)) continue;
-    if (stats.count < minPhraseCount) continue;
+  const results = [];
 
-    const { weight, type, ratio } = suggestWeight(stats.count, 0);
-    if (weight === 0) continue;
+  for (const [phrase, complainCount] of complainMap.entries()) {
+    const normalCount = normalMap.get(phrase) || 0;
 
-    suggestions.push({
+    const result = calculateWeight(complainCount, normalCount);
+    if (!result) continue;
+
+    results.push({
       phrase,
-      suggested_intent: 'complain',
-      weight,
-      type,
-      problem_count: stats.count,
-      update_count: 0,
-      ratio,
-      examples: stats.examples
+      complain_count: complainCount,
+      normal_count: normalCount,
+      ratio: Number(result.ratio.toFixed(2)),
+      weight: result.weight,
+      type: result.type,
+      examples: (exampleMap.get(phrase) || []).join(' | ')
     });
   }
 
-  suggestions.sort((a, b) => {
+  results.sort((a, b) => {
     if (b.weight !== a.weight) return b.weight - a.weight;
-    return b.problem_count - a.problem_count;
+    return b.complain_count - a.complain_count;
   });
 
   const outputDir = path.join(__dirname, 'output');
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir);
-  }
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir);
 
   const dateStamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-  const outputFile = process.env.OUTPUT_XLSX
-    ? path.resolve(process.env.OUTPUT_XLSX)
-    : path.join(outputDir, `complain_suggestions_${dateStamp}.xlsx`);
+  const outputFile = path.join(
+    outputDir,
+    `intent_keyword_suggestions_${dateStamp}.xlsx`
+  );
 
-  toXlsx(suggestions, outputFile);
-  console.log('Exported complain suggestions to:', outputFile);
+  toXlsx(results, outputFile);
+
+  console.log('Exported:', outputFile);
+  console.log('Total keywords:', results.length);
+  console.log('Finished. Docs processed:', processed, 'complain:', complainDocs, 'normal:', normalDocs, 'skipped:', skippedDocs);
 
   await mongo.close();
 };
 
 run().catch(err => {
-  console.error('Failed to run analyzeHardComplain:', err.message);
+  console.error('Error:', err);
   process.exit(1);
 });
